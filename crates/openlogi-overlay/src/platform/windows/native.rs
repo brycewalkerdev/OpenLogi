@@ -4,14 +4,16 @@
 use anyhow::{Context as _, Result, ensure};
 use gpui::{App, Bounds, DevicePixels, DisplayId, Window, point, size};
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
-use windows_sys::Win32::Foundation::{HWND, POINT};
+use windows_sys::Win32::Foundation::{HWND, POINT, SetLastError};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
     MonitorFromPoint, MonitorFromWindow,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
+    GWL_STYLE, GetCursorPos, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use super::RingPlacement;
@@ -75,7 +77,7 @@ impl RingPlacement {
 
     #[expect(
         unsafe_code,
-        reason = "borrow the live GPUI HWND on its owning UI thread"
+        reason = "configure and place the live GPUI HWND on its owning UI thread"
     )]
     pub(crate) fn show(self, window: &mut Window) -> Result<()> {
         let RawWindowHandle::Win32(handle) = window
@@ -86,6 +88,26 @@ impl RingPlacement {
             anyhow::bail!("ring window has no Win32 handle");
         };
         let hwnd = handle.hwnd.get() as HWND;
+        // GPUI 0.3.4 creates PopUp windows with style 0 (WS_OVERLAPPED),
+        // which lets Win32 add a caption and border. Establish a true popup
+        // while it is still a 1px bootstrap, preserving visibility and clipping.
+        // SAFETY: hwnd belongs to the still-borrowed window on this UI thread;
+        // GWL_STYLE reads and writes only its window-style bits.
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_STYLE).cast_unsigned();
+            let style = (style
+                & !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX))
+                | WS_POPUP;
+            // A zero previous style is valid; clear last-error to distinguish it
+            // from a failed SetWindowLongW call.
+            SetLastError(0);
+            if SetWindowLongW(hwnd, GWL_STYLE, style.cast_signed()) == 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(0) {
+                    return Err(error).context("remove Actions Ring window frame");
+                }
+            }
+        }
         // Pin the 1px bootstrap well inside the selected monitor (GPUI should
         // already have opened it there). If that crosses a DPI boundary,
         // SetWindowPos synchronously delivers WM_DPICHANGED; GPUI applies its
@@ -96,7 +118,11 @@ impl RingPlacement {
             self.display.center(),
             size(DevicePixels(1), DevicePixels(1)),
         );
-        set_bounds(hwnd, anchor, SWP_NOACTIVATE | SWP_NOZORDER)?;
+        set_bounds(
+            hwnd,
+            anchor,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        )?;
         // SAFETY: hwnd belongs to the still-borrowed window.
         let dpi = unsafe { GetDpiForWindow(hwnd) };
         ensure!(dpi != 0, "could not read ring window DPI");
