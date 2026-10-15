@@ -1,0 +1,16 @@
+id: overlay-ring-panel-geometry-owner
+language: rust
+severity: error
+message: Use ring::panel_bounds; ring/material.rs owns the disk geometry shared by painting and native blur.
+note: |
+  Separate inset calculations let native background effects extend beyond the
+  painted circle. Change the disk bounds in ring/material.rs and consume them
+  from both the renderer and platform effects.
+files:
+  - crates/openlogi-overlay/src/**/*.rs
+ignores:
+  - crates/openlogi-overlay/src/ring/material.rs
+rule:
+  any:
+    - pattern: px(18.0)
+    - pattern: $SIZE - 36.0

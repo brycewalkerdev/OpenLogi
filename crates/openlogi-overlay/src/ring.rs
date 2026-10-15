@@ -6,14 +6,13 @@
 
 use gpui::{Bounds, Pixels, Point, Size, point};
 use gpui::{
-    Context, Div, Hsla, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement, Render,
+    Context, Div, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement, Render,
     SharedString, StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance,
     WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
-use openlogi_ui::color;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -27,31 +26,8 @@ pub(crate) const WINDOW_SIZE: f32 = 360.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
 pub(crate) const RADIUS: f32 = 122.0;
 
-/// The ring's own neutral scale. It floats over whatever is on the desktop, so
-/// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
-/// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
-const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
-const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
-const GLYPH: Hsla = neutral(0.98, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
-const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
-
-const fn neutral(lightness: f32, alpha: f32) -> Hsla {
-    Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: lightness,
-        a: alpha,
-    }
-}
-
-/// The accent deepened for the dark panel: the brand lightness sits too close to
-/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
-/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
-const SELECTED_FILL_L: f32 = 0.48;
-const SELECTED_BORDER_L: f32 = 0.78;
+mod material;
+pub(crate) use material::{RingPalette, panel_bounds};
 
 pub(crate) struct RingView {
     invocation: ActionRingInvocation,
@@ -60,6 +36,7 @@ pub(crate) struct RingView {
     /// Keeps click-away identity published until the last display view closes.
     _showing: Arc<ShowingRing>,
     placement: PanelPlacement,
+    palette: RingPalette,
 }
 
 impl RingView {
@@ -76,7 +53,15 @@ impl RingView {
             hovered: None,
             _showing: showing,
             placement,
+            palette: RingPalette::default(),
         }
+    }
+
+    /// Apply compositor-independent colors resolved for this invocation.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_palette(mut self, palette: RingPalette) -> Self {
+        self.palette = palette;
+        self
     }
 
     /// The ring session this view is showing.
@@ -99,6 +84,11 @@ impl RingView {
         let presentation = self.invocation.slots.get(&slot)?;
         let icon_path = presentation.icon.asset_path();
         let selected = self.hovered == Some(slot);
+        let glyph = if selected {
+            self.palette.selected_text
+        } else {
+            self.palette.button_text
+        };
         let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
         let activate = self.commands.clone();
@@ -114,18 +104,17 @@ impl RingView {
                 .justify_center()
                 .rounded_full()
                 .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
+                    self.palette.selected
                 } else {
-                    SLOT_RESTING
+                    self.palette.button
                 })
                 .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
+                    slot.border_2().border_color(self.palette.focus)
                 })
                 .shadow_md()
-                .text_color(GLYPH)
+                .text_color(glyph)
                 .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
+                .child(svg().path(icon_path).size(px(22.0)).text_color(glyph))
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
                     if *hovered && this.hovered != Some(slot) {
                         this.hovered = Some(slot);
@@ -150,6 +139,7 @@ impl RingView {
     }
 
     fn panel(&self, cx: &mut Context<Self>) -> Div {
+        let surface = panel_bounds(Point::default());
         let session_id = self.invocation.session_id;
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
@@ -177,11 +167,12 @@ impl RingView {
             .child(
                 div()
                     .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
+                    .left(surface.origin.x)
+                    .top(surface.origin.y)
+                    .w(surface.size.width)
+                    .h(surface.size.height)
                     .rounded_full()
-                    .bg(PANEL)
+                    .bg(self.palette.panel)
                     .shadow_lg(),
             )
             .children(slots)
@@ -196,8 +187,8 @@ impl RingView {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(CANCEL_RESTING)
-                    .text_color(CANCEL_GLYPH)
+                    .bg(self.palette.cancel)
+                    .text_color(self.palette.muted_text)
                     .cursor_pointer()
                     .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
                     .on_click(move |_, _, cx| {
@@ -217,7 +208,7 @@ impl RingView {
                         .w(px(160.0))
                         .text_center()
                         .text_sm()
-                        .text_color(LABEL)
+                        .text_color(self.palette.text)
                         .child(label),
                 )
             })
@@ -228,16 +219,18 @@ impl Render for RingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session_id = self.invocation.session_id;
         let commands = self.commands.clone();
-        let panel = self
+        let origin = self
             .placement
-            .origin(window.window_handle().window_id(), window.viewport_size())
-            .map(|origin| {
-                div()
-                    .absolute()
-                    .left(origin.x)
-                    .top(origin.y)
-                    .child(self.panel(cx))
-            });
+            .origin(window.window_handle().window_id(), window.viewport_size());
+        #[cfg(target_os = "linux")]
+        crate::platform::material::update(window, cx, origin);
+        let panel = origin.map(|origin| {
+            div()
+                .absolute()
+                .left(origin.x)
+                .top(origin.y)
+                .child(self.panel(cx))
+        });
         div()
             .id("ring-root")
             .relative()

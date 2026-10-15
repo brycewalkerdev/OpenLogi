@@ -158,3 +158,6 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
 pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
     None
 }
+
+#[cfg(target_os = "linux")]
+pub(crate) mod material;

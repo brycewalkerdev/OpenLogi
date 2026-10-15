@@ -22,6 +22,7 @@ pub(super) fn open_ring_windows(
     showing: &Arc<ShowingRing>,
 ) -> Result<()> {
     let placement = PanelPlacement::default();
+    let palette = super::material::palette();
     let mut opened = false;
     for display in cx.displays() {
         // Maximize through the compositor: wl_output's integer-scaled display
@@ -34,7 +35,8 @@ pub(super) fn open_ring_windows(
             window_decorations: Some(WindowDecorations::Client),
             ..ring_window_options()
         };
-        let result = cx.open_window(options, |_, cx| {
+        let result = cx.open_window(options, |window, cx| {
+            super::material::prepare(window, cx);
             cx.new(|_| {
                 RingView::new(
                     invocation.clone(),
@@ -42,6 +44,7 @@ pub(super) fn open_ring_windows(
                     Arc::clone(showing),
                     placement.clone(),
                 )
+                .with_palette(palette)
             })
         });
         match result {
