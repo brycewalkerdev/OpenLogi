@@ -22,15 +22,15 @@ mod session;
 use std::sync::Arc;
 
 use anyhow::Result;
-use gpui::AppContext as _;
 use tracing::warn;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
 use crate::ipc::OverlayCommand;
-use crate::platform::RingPlacement;
-use crate::ring::RingView;
-use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
+use crate::session::{
+    ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
+    spawn_click_away_dismissal,
+};
 
 fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
@@ -63,64 +63,30 @@ fn main() -> Result<()> {
                 // session, so there is nothing to acknowledge either.
                 let Some(invocation) = observed else {
                     cx.update(|cx| {
-                        for handle in cx.windows() {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
-                        }
+                        close_all_ring_windows(cx);
                     });
                     continue;
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
-                    for handle in cx.windows() {
-                        let _ = handle.update(cx, |_, window, _| window.remove_window());
-                    }
-                    let placement = match RingPlacement::capture(cx) {
-                        Ok(placement) => placement,
-                        Err(error) => {
-                            warn!(%error, "could not locate Actions Ring display");
-                            let _ = commands.send(OverlayCommand::Cancel {
-                                session_id: invocation.session_id,
-                            });
-                            return;
-                        }
-                    };
-                    let commands = commands.clone();
-                    let timeout_commands = commands.clone();
+                    close_all_ring_windows(cx);
                     let session_id = invocation.session_id;
-                    match cx.open_window(placement.window_options(), |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands, &live_session))
-                    }) {
-                        Ok(handle) => {
-                            if let Err(error) = handle
-                                .update(cx, |_, window, cx| {
-                                    // Native placement resizes the window inside this
-                                    // update, where GPUI's own resize/move callbacks
-                                    // cannot borrow the app. Resync its viewport and
-                                    // scale, or it keeps rendering at the bootstrap size.
-                                    placement.show(window).map(|()| window.bounds_changed(cx))
-                                })
-                                .and_then(std::convert::identity)
-                            {
-                                warn!(%error, "could not position Actions Ring window");
-                                let _ = handle.update(cx, |_, window, _| window.remove_window());
-                                let _ =
-                                    timeout_commands.send(OverlayCommand::Cancel { session_id });
-                                return;
-                            }
-                            cx.spawn(async move |cx| {
-                                cx.background_executor().timer(DISPLAY_LIFETIME).await;
-                                if handle
-                                    .update(cx, |_, window, _| window.remove_window())
-                                    .is_ok()
-                                {
-                                    let _ = timeout_commands
-                                        .send(OverlayCommand::Cancel { session_id });
-                                }
-                            })
-                            .detach();
-                        }
-                        Err(error) => warn!(%error, "could not open Actions Ring window"),
+                    let showing = Arc::new(live_session.showing(session_id));
+                    if let Err(error) =
+                        platform::open_ring_windows(cx, invocation, commands.clone(), showing)
+                    {
+                        warn!(%error, "could not open Actions Ring windows");
+                        let _ = commands.send(OverlayCommand::Cancel { session_id });
+                        return;
                     }
+                    let timeout_commands = commands.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(DISPLAY_LIFETIME).await;
+                        if cx.update(|cx| close_ring_windows(cx, session_id)) {
+                            let _ = timeout_commands.send(OverlayCommand::Cancel { session_id });
+                        }
+                    })
+                    .detach();
                 });
             }
         })

@@ -1,4 +1,4 @@
-//! GPUI placement on macOS and Linux.
+//! Positioned GPUI windows on macOS and Linux/X11.
 
 use gpui::{Bounds, DisplayId, Pixels, Point, Size, WindowBounds, WindowOptions, point, px};
 

@@ -1,5 +1,10 @@
 //! Native window policy for the standalone Actions Ring overlay.
 
+mod ring_windows;
+pub(crate) use ring_windows::open_ring_windows;
+#[cfg(target_os = "linux")]
+mod wayland;
+
 #[cfg(not(target_os = "windows"))]
 mod placement;
 // Keep Windows geometry tests runnable on the host; only native.rs needs Win32.

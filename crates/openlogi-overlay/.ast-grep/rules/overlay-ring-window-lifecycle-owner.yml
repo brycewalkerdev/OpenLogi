@@ -1,0 +1,14 @@
+id: overlay-ring-window-lifecycle-owner
+language: rust
+severity: error
+message: Use session::close_ring_windows or session::close_all_ring_windows; session.rs owns the complete Actions Ring window set and stale-session checks.
+note: |
+  Wayland opens a transparent window per display. Removing only the clicked
+  window leaves the other displays covered, while an unscoped timeout can
+  close a replacement session. Session teardown has one owner.
+files:
+  - crates/openlogi-overlay/src/**/*.rs
+ignores:
+  - crates/openlogi-overlay/src/session.rs
+rule:
+  pattern: $WINDOW.remove_window()

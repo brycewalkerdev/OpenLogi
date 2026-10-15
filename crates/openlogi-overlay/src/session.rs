@@ -18,7 +18,7 @@ use crate::ring::RingView;
 
 pub(crate) struct ClickAwaySession(AtomicU64);
 
-/// Publication guard tied to the lifetime of one ring view.
+/// Publication guard shared by every window displaying one ring session.
 ///
 /// Dropping an older view cannot clear a replacement's session: teardown uses
 /// a compare-and-exchange against the id this guard published.
@@ -70,8 +70,9 @@ pub(crate) const fn click_away_targets(observed: u64, open: u64) -> bool {
 /// Dismiss a showing ring when the user clicks anywhere off it, the way a
 /// transient popup closes on click-away — without swallowing that click.
 ///
-/// The ring window only covers its own 360×360 bounds, so an outside click
-/// never reaches the window's handlers. A global monitor closes the gap:
+/// Positioned ring windows cover only their own 360×360 bounds, so an outside
+/// click never reaches their handlers. Wayland's covering windows handle it
+/// locally; for positioned windows a global monitor closes the gap:
 /// macOS only delivers it events routed to *other* applications, so clicks on
 /// the ring itself can't race the slot/cancel handlers, and monitors can't
 /// consume events, so the click lands where the user aimed it. The handler
@@ -112,14 +113,49 @@ pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
         let Some(ring) = handle.downcast::<RingView>() else {
             continue;
         };
-        let _ = ring.update(cx, |view, window, _| {
-            if !click_away_targets(session_id, view.session_id()) {
-                return;
-            }
-            view.cancel();
-            window.remove_window();
-        });
+        let cancelled = ring
+            .update(cx, |view, _, _| {
+                if !click_away_targets(session_id, view.session_id()) {
+                    return false;
+                }
+                view.cancel();
+                true
+            })
+            .unwrap_or(false);
+        if cancelled {
+            close_ring_windows(cx, session_id);
+            break;
+        }
     }
+}
+
+/// Close the complete window set for this session; stale timers cannot close a replacement.
+pub(crate) fn close_ring_windows(cx: &mut gpui::App, session_id: u64) -> bool {
+    close_windows(cx, Some(session_id))
+}
+
+/// Clear the previous ring before publishing an invocation or agent dismissal.
+pub(crate) fn close_all_ring_windows(cx: &mut gpui::App) {
+    close_windows(cx, None);
+}
+
+fn close_windows(cx: &mut gpui::App, session_id: Option<u64>) -> bool {
+    let mut closed = false;
+    for handle in cx.windows() {
+        let Some(ring) = handle.downcast::<RingView>() else {
+            continue;
+        };
+        closed |= ring
+            .update(cx, |view, window, _| {
+                if session_id.is_some_and(|session_id| view.session_id() != session_id) {
+                    return false;
+                }
+                window.remove_window();
+                true
+            })
+            .unwrap_or(false);
+    }
+    closed
 }
 
 pub(crate) fn claim_the_role() -> Result<Tenancy> {
@@ -169,6 +205,17 @@ mod tests {
         let showing = live.showing(11);
         assert_eq!(live.observe(), Some(11));
         drop(showing);
+        assert_eq!(live.observe(), None);
+    }
+
+    #[test]
+    fn publication_lasts_until_the_last_display_window_is_dropped() {
+        let live = Arc::new(ClickAwaySession::new());
+        let first_window = Arc::new(live.showing(7));
+        let second_window = Arc::clone(&first_window);
+        drop(first_window);
+        assert_eq!(live.observe(), Some(7));
+        drop(second_window);
         assert_eq!(live.observe(), None);
     }
 

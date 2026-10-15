@@ -4,12 +4,11 @@
 //! clamped to the display it came up on, so a ring raised near a screen edge
 //! stays whole instead of being cut off.
 
-#[cfg(any(not(target_os = "windows"), test))]
 use gpui::{Bounds, Pixels, Point, Size, point};
 use gpui::{
-    Context, Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance, WindowKind,
-    WindowOptions, div, prelude::FluentBuilder as _, px, svg,
+    Context, Div, Hsla, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance,
+    WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
@@ -19,7 +18,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::ipc::OverlayCommand;
-use crate::session::{ClickAwaySession, ShowingRing};
+use crate::session::{ShowingRing, close_ring_windows};
+
+mod placement;
+pub(crate) use placement::PanelPlacement;
 
 pub(crate) const WINDOW_SIZE: f32 = 360.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
@@ -55,8 +57,9 @@ pub(crate) struct RingView {
     invocation: ActionRingInvocation,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
-    /// Publishes click-away identity for exactly this view's lifetime.
-    _showing: ShowingRing,
+    /// Keeps click-away identity published until the last display view closes.
+    _showing: Arc<ShowingRing>,
+    placement: PanelPlacement,
 }
 
 impl RingView {
@@ -64,14 +67,15 @@ impl RingView {
     pub(crate) fn new(
         invocation: ActionRingInvocation,
         commands: mpsc::UnboundedSender<OverlayCommand>,
-        live: &Arc<ClickAwaySession>,
+        showing: Arc<ShowingRing>,
+        placement: PanelPlacement,
     ) -> Self {
-        let showing = live.showing(invocation.session_id);
         Self {
             invocation,
             commands,
             hovered: None,
             _showing: showing,
+            placement,
         }
     }
 
@@ -80,8 +84,7 @@ impl RingView {
         self.invocation.session_id
     }
 
-    /// Report this ring cancelled. The window is closed by the caller, which
-    /// is the only one holding the handle.
+    /// Report this ring cancelled; the caller closes the session's window set.
     pub(crate) fn cancel(&self) {
         let _ = self.commands.send(OverlayCommand::Cancel {
             session_id: self.invocation.session_id,
@@ -135,20 +138,19 @@ impl RingView {
                         cx.notify();
                     }
                 }))
-                .on_click(move |_, window, cx| {
+                .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    window.remove_window();
+                    cx.defer(move |cx| {
+                        close_ring_windows(cx, session_id);
+                    });
                 })
                 .into_any_element(),
         )
     }
-}
 
-impl Render for RingView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn panel(&self, cx: &mut Context<Self>) -> Div {
         let session_id = self.invocation.session_id;
-        let root_commands = self.commands.clone();
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
             let presentation = self.invocation.slots.get(&slot)?;
@@ -170,9 +172,8 @@ impl Render for RingView {
             .collect::<Vec<_>>();
 
         div()
-            .id("ring-root")
             .relative()
-            .size_full()
+            .size(px(WINDOW_SIZE))
             .child(
                 div()
                     .absolute()
@@ -199,10 +200,12 @@ impl Render for RingView {
                     .text_color(CANCEL_GLYPH)
                     .cursor_pointer()
                     .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
-                    .on_click(move |_, window, cx| {
+                    .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        window.remove_window();
+                        cx.defer(move |cx| {
+                            close_ring_windows(cx, session_id);
+                        });
                     }),
             )
             .when_some(hovered_label, |ring, label| {
@@ -218,9 +221,38 @@ impl Render for RingView {
                         .child(label),
                 )
             })
-            .on_click(move |_, window, _| {
-                let _ = root_commands.send(OverlayCommand::Cancel { session_id });
-                window.remove_window();
+    }
+}
+
+impl Render for RingView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let session_id = self.invocation.session_id;
+        let commands = self.commands.clone();
+        let panel = self
+            .placement
+            .origin(window.window_handle().window_id(), window.viewport_size())
+            .map(|origin| {
+                div()
+                    .absolute()
+                    .left(origin.x)
+                    .top(origin.y)
+                    .child(self.panel(cx))
+            });
+        div()
+            .id("ring-root")
+            .relative()
+            .size_full()
+            // GPUI synthesizes MouseMove from wl_pointer.enter even when the
+            // pointer is stationary. Latch it once, before painting the panel.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if this.placement.pointer_entered(window.window_handle().window_id(), event.position) {
+                    cx.notify();
+                }
+            }))
+            .children(panel)
+            .on_click(move |_, _, cx| {
+                let _ = commands.send(OverlayCommand::Cancel { session_id });
+                cx.defer(move |cx| { close_ring_windows(cx, session_id); });
             })
     }
 }
@@ -241,15 +273,14 @@ pub(crate) fn ring_window_options() -> WindowOptions {
     }
 }
 
-#[cfg(any(not(target_os = "windows"), test))]
 pub(crate) fn clamp_window_origin(
     desired: Point<Pixels>,
     window_size: Size<Pixels>,
     display: Bounds<Pixels>,
 ) -> Point<Pixels> {
     let max = point(
-        display.right() - window_size.width,
-        display.bottom() - window_size.height,
+        (display.right() - window_size.width).max(display.left()),
+        (display.bottom() - window_size.height).max(display.top()),
     );
     desired.clamp(&display.origin, &max)
 }
