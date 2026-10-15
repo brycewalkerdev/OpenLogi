@@ -8,8 +8,8 @@
 use gpui::{Bounds, Pixels, Point, Size, point};
 use gpui::{
     Context, Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance, WindowKind,
-    WindowOptions, div, prelude::FluentBuilder as _, px, svg,
+    StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance, WindowDecorations,
+    WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
@@ -229,6 +229,9 @@ impl Render for RingView {
 pub(crate) fn ring_window_options() -> WindowOptions {
     WindowOptions {
         titlebar: None,
+        // Linux negotiates decorations independently of `titlebar`. The ring
+        // draws its own surface and must not acquire compositor window chrome.
+        window_decorations: Some(WindowDecorations::Client),
         focus: false,
         show: true,
         kind: WindowKind::PopUp,
